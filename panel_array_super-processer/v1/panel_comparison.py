@@ -26,6 +26,8 @@ Code written by Trevor Kent Carter, starting August 5th, 2024
 	of hinges in order to more accurately gauge repeatability and precision for
 	individual hinges.
 
+ 	This is basically step 4 from what Jake wrote on the whiteboard. Takes in JSON files and gives you angle btween the normal vectors.
+
 Axis Definitions (Looking down on two tall planes, side by side with eachother)
 	X: Up, along the hinges.
 	Y: Left, into the left panel
