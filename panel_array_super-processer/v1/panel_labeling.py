@@ -3,7 +3,7 @@ from json import dumps as json_dumps
 import numpy as np
 
 import skspatial.objects as skobj
-
+# jake wrote this on his machine
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import tkinter as tk
