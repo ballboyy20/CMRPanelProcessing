@@ -4,6 +4,7 @@ import numpy as np
 
 import skspatial.objects as skobj
 # jake wrote this on his machine
+# Trevor wrote this to test merging!
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import tkinter as tk
