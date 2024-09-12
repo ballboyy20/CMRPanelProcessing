@@ -1,0 +1,16 @@
+Joint Type,Scan Iteration,theta_x,theta_y,delta_z
+3-arm SLET,1,1,2,3
+3-arm SLET,2,1,2,3
+3-arm SLET,3,1,2,3
+3-arm SLET,4,1,2,3
+3-arm SLET,5,1,2,3
+3-arm Spring,1,1,2,3
+3-arm Spring,2,1,2,3
+3-arm Spring,3,1,2,3
+3-arm Spring,4,1,2,3
+3-arm Spring,5,1,2,3
+Cymaldo,1,1,2,3
+Cymaldo,2,1,2,3
+Cymaldo,3,1,2,3
+Cymaldo,4,1,2,3
+Cymaldo,5,1,2,3
