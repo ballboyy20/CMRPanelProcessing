@@ -48,9 +48,11 @@ def main():
 	find_panel_data(warped_flasher_file, warped_flasher_data_directory, 27, save_posttext='_panelData')
 
 
-# High level wrapper function where the various steps are executed
 def find_panel_data(cut_flasher_filepath, save_directory, panel_num, save_posttext='_panel_data', verbose=False, graph_clusters=True):
 	"""
+	This function starts with the filepath of a preprocessed .stl file representing
+	panels. Outliers are removed and k-means is used to generate clusters
+
 	:param cut_flasher_filepath: Filepath to a .stl file containing uniformly sized selections from flat_scans surfaces on panels of a panel array
 	:param save_directory: None or Directory path to which the centers and normals of the panel groups from the panel array will be saved
 	:param panel_num: The number of point selection groups, normally representing panels, which will be used by k-means
@@ -62,6 +64,7 @@ def find_panel_data(cut_flasher_filepath, save_directory, panel_num, save_postte
 		position of this panel and the normal to the best-fit plane for that group of points.
 	"""
 	# Generate a list of points from the .stl file vertices
+	# TODO: Integrate the ability to read a variety of file types
 	mesh_points = pv.read(cut_flasher_filepath).points
 	# After iteratively removing outliers, save the plane of best fit and points
 	plane, points, kept_point_indices, iterations, original_range, new_range = planar_outlier_removal(mesh_points, cutoff_scaling=20, step=0.0005, verbose=True)
@@ -76,14 +79,15 @@ def find_panel_data(cut_flasher_filepath, save_directory, panel_num, save_postte
 		print("Removed Points: ", mesh_points.shape[0] - points.shape[0])
 		print("Removed Point Percentage: ", 100-100*(mesh_points.shape[0] - points.shape[0])/mesh_points.shape[0], "%")
 	
-	# Make clusters, considering the points if they were to be projected onto the plane of best fit of the whole array
+	# Make clusters of the points by how they are projected onto the 2D plane of best fit of the whole array
 	labels, centroids, ref_points_2d = get_clusters(points, plane, n_clusters=panel_num)
 	
 	# Optionally visualizing the 2d groupings
 	if graph_clusters:
 		plot_clusters(ref_points_2d, labels, centroids)
 	
-	# Produce a .json compatible structure (lists and dictionaries) saving each panel's arbitrary label, center and normal
+	# Produce a .json compatible structure (lists and dictionaries containing only Python-native objects)
+	# saving each panel's randomly assigned unique label, center position and normal vector
 	cluster_data = format_clusters(labels, points, plane.normal)
 	
 	if save_directory is not None:
@@ -125,57 +129,57 @@ def format_clusters(cluster_labels, point_cloud, main_vector):
 	return cluster_data
 	
 		
-
-
-# This will remove outlier points, relative to the normal of the plane of
-# best fit, until the range of refined points has more than the target
-# proportion of the previous iteration (i.e. when removing the extreme
-# points is no longer significantly affecting the point distribution
-# along that direction)
 def planar_outlier_removal(original_points, outlier_axis='norm', target=None, cutoff_scaling=20,
 						   step=0.001, iter_limit=20, verbose=False):
 	"""
+	This will remove points that are outliers by their positions projected onto the normal
+	of the plane of best fit. This is repeated iteratively until removing the extreme
+	points no longer significantly affects the distribution of the remaining points.
+
 	:param original_points: PyVista object containing all points in the mesh being read
 	:param outlier_axis: 'norm' or skspatial.objects.Line object. If left to default 'norm', will remove outliers
 		relative to the normal of the plane of best fit. Otherwise, will remove outliers relative to the provided line.
-	:param target: Float between 0.0 and 1.0. The proportion of the range along the normal of the new reduced plane
-		to the range along the normal of the previous plane at which point the iterative program will stop removing points.
+	:param target: Float between 0.0 and 1.0. The program measures the proportion of a) the range of points projected onto the normal of the plane after outliers have been removed,
+		to b) the range of those points including the outliers. The iterative program will stop removing points when this proportion exceeds that of 'target'
 	:param cutoff_scaling: Positive float value. Alternative option to target, sets the target proportion as 1.0 - cutoff_scaling * step.
-	:param step: The combined proportion removed equally from the extremities along the normal of the plane of best fit
+		A bigger target value will be easier to reach, while a small target value will only be reached when a very high density of points is located.
+	:param step: The combined proportion removed equally from the extremities along the normal of the plane of best fit per pass. As
+		long as no specific 'target' value has been passed, smaller steps means outlier removal will take more iterations and be more
+		fine (potentially being less greedy while removing outliers, at the risk of being more sensitive to large collections of outliers)
 	:param iter_limit: After this many iterations removing outliers, stop, and return what was obtained
 	:return final_plane, final_points: The remaining points and the plane of best fit that was generated from them
 	"""
 	# ^ is the logical NAND operator: True if exactly one of the inputs are True, False otherwise.
+	# Either a manual target must be set, or the cutoff_scaling left (or updated)
 	if not ((target is None) ^ (cutoff_scaling is None)):
-		raise UserWarning("You must provide a target removal percentage, or at make sure cutoff_scaling is not None.")
-	
+		raise UserWarning("You must provide a target removal percentage, or at least make sure cutoff_scaling is not None.")
+
 	# I added the "cutoff_scaling" option because of a way that I found "target" could break.
-	# If the step size was very small, target doesn't change at all, and at some point,
+	# If the step size was changed to be very small but target wasn't changed at all,
 	# removing few enough outliers does sufficiently little to shrink the total range
-	# that the target is instantly met. Setting our final_target relative to our steps
-	# implies that for small steps, the new range must be significantly closer to the
-	# previous iteration's range than would be required to stop removing outliers for
-	# large steps. Increasing the cutoff_scaling makes the target easier to meet, to avoid cutting
-	# out too many points.
+	# that the target may be instantly met. Making the final_target directly correlated to step size
+	# implies that for smaller steps, the target is higher and harder to hit.
 	if target:
 		final_target = target
 	else:
 		final_target = 1.0 - (cutoff_scaling * step)
 	
 	# This does the following to the data:
-	#  1) Create a 1d array, matching our cloud_array, of the points by their positions along the normal of the plane
-	#  2) Return only the points corresponding to some inter % of the points, ordered along the normal
+	#  1) Create a 1d array, of the same height as the passed points, containing their positions projected onto the normal of the plane
+	#  2) Remove some outer percentage of points from both extremes (determined by step)
+	# TODO: Visualize the distribution of points along the normal of a plane of best fit using a ____ plot
 	def remove_outliers(old_points, outlier_line):
 		# Project all points of the point cloud onto this line
 		cloud_line = outlier_line.transform_points(old_points)
-		# Get the total range of values along this line
+		# Find the total range of values of all points along the normal line
 		old_range = max(cloud_line) - min(cloud_line)
-		# Get the minimum and maximum values of the inner range for points to be cut off
+		# Get the values of the upper and lower percentile points to create an inner range of values for the points to be kept
+		# TODO: update this to use quantile (to remove scaling by a factor of 100)
 		lower_bound = np.percentile(cloud_line, 100 * (0.0 + step / 2))
 		upper_bound = np.percentile(cloud_line, 100 * (1.0 - step / 2))
-		# Solve for the new resulting range of values along the normal line
+		# Find the total range of values of the points within that inner range along the normal line
 		new_range = upper_bound - lower_bound
-		# Make a active_indices indicating only those points within the lower and upper bounds along the normal
+		# Make a active_indices map correlating only those rows for points within the lower and upper bounds along the normal
 		inner_mask = (cloud_line >= lower_bound) & (cloud_line <= upper_bound)
 		# Apply that active_indices to the point cloud itself
 		new_points = old_points[inner_mask]
@@ -186,30 +190,34 @@ def planar_outlier_removal(original_points, outlier_axis='norm', target=None, cu
 	original_range = None
 	active_indices = np.arange(original_points.shape[0])
 	
-	# Iteratively remove outliers until the ratio of the new range
-	# to the old range for this iteration meets the final target
+
+	# Iteratively remove the outer percentiles of outliers until this has a sufficiently small effect on the
+	# total value range of points as projected along the normal of the plane of best fit
 	while True:
 		# By default, outliers will be removed along the normal of the plane of best fit of this collection of points
 		if outlier_axis == 'norm':
 			# Get a line through the plane's center and normal
 			prev_plane = iter_best_fit_plane(prev_points)
 			removal_line = skobj.Line(point=prev_plane.point, direction=prev_plane.normal)
-		# An skspatial.objects.Line object can be provided as an axis for the removal of outliers instead
+		# An skspatial.objects.Line object can be provided as an axis for the
+		# removal of outliers instead, to remove outliers in other 1D axes
 		else:
 			assert isinstance(outlier_axis, skobj.Line)
 			removal_line = outlier_axis
-		# Get the list of points, the mask that produced them, and the old and new ranges.
+		# Get the list of new points without outliers, the mask that produced them, and the old and new ranges each.
 		filtered_points, this_mask, new_range, old_range = remove_outliers(prev_points, removal_line)
-		# We need to keep track of the original positions of these filtered points, such
-		# that the faces of the original shape can still be referenced correctly at the end of this whole process
+		# We need to keep track of the index positions of these filtered points from the original array where
+		# they were stored. The faces in .stl files are groups of index references to vertex positions. Saving
+		# indicies allows us to rebuild those original faces (excluding any faces that included outlier points)
+		# TODO: Find a way to accound for points that were ignored because they shared a face with an outlier
 		active_indices = active_indices[this_mask]
 		iterations += 1
-		# The first time we solve the range of points, save it (for reference of before vs. after removing outliers)
+		# The first time we solve the range of points, save it
 		if original_range is None:
 			original_range = copy(old_range)
-		# If the removal of these outliers has a sufficiently small effect on the range of points
-		# along the normal of the plane such that it meets the target, stop iterating, we have
-		# converged on an appropriate solution. OR, if the iteration limit is reached, stop just the same.
+		# When the ratio of a) the range of this new iteration to b) the range of the previous
+		# iteration meets the final target, stop iterating, we have converged on an appropriate
+		# solution. OR, if the iteration limit is reached, stop just the same.
 		if (new_range / old_range > final_target) or (iterations >= iter_limit):
 			final_plane = iter_best_fit_plane(filtered_points)
 			final_points = filtered_points
@@ -224,6 +232,8 @@ def planar_outlier_removal(original_points, outlier_axis='norm', target=None, cu
 	else:
 		return final_plane, final_points, active_indices
 
+
+# ANNOTATED TO THIS POINT--------------------------------------------------------------------------------------------------------------------------------------------------------
 
 # This will sort through the complete list of points to form some number of groups
 def get_clusters(point_cloud, best_fit_plane, n_clusters, cluster_similarity=2.5, km_iter_lim=20):
