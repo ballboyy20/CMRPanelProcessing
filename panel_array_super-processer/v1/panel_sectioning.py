@@ -397,8 +397,6 @@ def iter_best_fit_plane(coordinates):
 	return plane
 
 
-# ANNOTATED TO THIS POINT--------------------------------------------------------------------------------------------------------------------------------------------------------
-
 def plot_clusters(points, cluster_labels, centroids=None):
 	"""
 	This code was written for the original panel comparing algorithm, to graph grouped
