@@ -233,92 +233,114 @@ def planar_outlier_removal(original_points, outlier_axis='norm', target=None, cu
 		return final_plane, final_points, active_indices
 
 
-# ANNOTATED TO THIS POINT--------------------------------------------------------------------------------------------------------------------------------------------------------
-
-# This will sort through the complete list of points to form some number of groups
-def get_clusters(point_cloud, best_fit_plane, n_clusters, cluster_similarity=2.5, km_iter_lim=20):
+def get_clusters(point_cloud, best_fit_plane, n_clusters, cluster_similarity=2.5, km_iter_lim=20, center_type='spatial', verbose=True):
 	"""
+	Observing a set of points, project them into their own plane of best fit, then use
+	k-means to identify the point groups selected by the user during preprocessing.
+	Verify that all clusters are similarly sized (to a tolerance), then return them.
 	
 	:param point_cloud: skspatial.objects.Points object or a NumPy array where a list of vertices is provided
 	:param best_fit_plane: skspatial.objects.Plane object, for this point cloud
 	:param n_clusters: Integer value for the number of groups to search for, passed along to k-means
 	:param cluster_similarity: Float value, if the ratio of the largest group to the smallest one is greater than this, k-means will be reinitialized
-	:param km_iter_lim: After this many iterations, raise a TimeoutError, since a satisfactory solution could not be reached
+	:param km_iter_lim: After this many iterations, raise a TimeoutError, since satisfactory clusters couldn't be formed
+	:param center_type: 'spatial' to calculate cluster centers as the middle points of the extremes
+		in each dimension, 'centroid' to use the centroids produced by the k-means algorithm itself
+	:param verbose: If True, give real time data as clusters are formed
 	:return: labels, centroids, trans_proj_cloud: For all points, labels about which cluster the point would
 		be grouped into. Central positions for each cluster. The 2D transformed coordinates that were used.
 	"""
-	# Randomly produce the x and y components of an orthonormal basis with the normal of the plane of
+	# Randomly produce x and y vectors that form an orthonormal basis with the normal of the plane of best fit
 	b1, b2 = generate_orthonormal_basis(best_fit_plane)
-	# Transform the points into a coordinate system using the above unit vectors (and the best fit plane's normal vector) as bases.
+	# Transform the points into a coordinate system with the previously generated unit vectors (and the
+	# plane of best fit's normal vector) as bases and the plane of best fit's point as the origin. Discard
+	# the z coordinates (out of the plane), effectively projecting the points onto a 2D plane.
 	trans_proj_cloud = sktrf.transform_coordinates(point_cloud, best_fit_plane.point, (b1, b2, best_fit_plane.normal))[:, 0:2]
 	
-	print(f"Using k-means clustering algorithm, searching for {n_clusters} clusters.")
+	if verbose:
+		print(f"Using k-means clustering algorithm, searching for {n_clusters} clusters.")
+
 	if not isinstance(n_clusters, int):
 		raise UserWarning("k-means requires an integer for the number of clusters, but you provided ", n_clusters)
 	iteration = 1
-	# Keep reinitializing k-means if the cluster sizes are too different
+	# Keep reinitializing k-means until clusters are formed that are close enough in size
 	while True:
 		if iteration > km_iter_lim:
 			raise TimeoutError(f"With {iteration} iterations, surpassed the limit set for k-means. Try adjusting"
 							   f"cluster_similarity to expand or shrink the expected similarity in size between"
 							   f"clusters, or increasing the allowed number of iterations with km_iter_lim")
-		# Initializing, fitting and making predictions about labels with the model
+		# Initializing
 		km_model = KMeans(n_clusters=n_clusters)
-		# Make a k shaped array, where each value is an integer, representing the
-		# label for a point at the corresponding row of points passed to the model
+		# Fitting the model to our 2D transformed point cloud and grouping it. Makes a 1D array,
+		# where each element is an integer, representing the assigned cluster
+		# of the point at the corresponding row of the point cloud passed to the model.
 		labels = km_model.fit_predict(trans_proj_cloud)
 		# Make a k * n shaped array, where n is the number of dimensions of our coordinates,
-		# and k is the number of groups, where each column (n) contains the maximal distance
-		# between points of a given group (by row, k) in that particular dimension
+		# and k is the number of clusters, where each column (n) contains the maximal distance
+		# in that dimension for all points of a given cluster (by row, k)
 		ranges = np.array([np.ptp(trans_proj_cloud[labels == label], axis=0) for label in np.unique(labels)])
-		# Make two n shaped array, respectively containing the smallest and largest group size values of each dimension
+		# Make two n shaped array, respectively containing the smallest and largest cluster sizes in each dimension
 		min_ranges = np.min(ranges, axis=0)
 		max_ranges = np.max(ranges, axis=0)
-		print("Smallest cluster size (x, y): ", min_ranges)
-		print("Largest cluster size (x, y): ", max_ranges)
-		# For all dimensions (columns), if the maximum range is less than 120% of the minimum range, the model must have made even groups that catch all panels.
+		if verbose:
+			print("Smallest cluster size (x, y): ", min_ranges)
+			print("Largest cluster size (x, y): ", max_ranges)
+		# For all dimensions (columns), if the maximum range is less than 120% of the minimum range, the model must have made
+		# even groups that catch all panels. When this is done, simply exit the loop and use the latest assigned group values.
 		if np.all(max_ranges <= min_ranges * cluster_similarity):
-			print(f"After {iteration} iterations, found clusters such that the largest group's size is within {100*cluster_similarity}% of the that of the smallest group.")
+			if verbose:
+				print(f"After {iteration} iterations, found clusters such that the largest group's size is within {100*cluster_similarity}% of the that of the smallest group.")
 			break
 		else:
-			print("There exists a dissimilarity in size greater than the limit of ", 100*cluster_similarity, "%")
-			print("Re-initializing k-means to try again...")
+			if verbose:
+				print("There exists a dissimilarity in size greater than the limit of ", 100*cluster_similarity, "%")
+				print("Re-initializing k-means to try again...")
 			iteration += 1
-	# The k-means model also generates centers for each cluster. When we've found a satisfactory grouping, get the centroids of each group.
-	#TODO: Verify that the centroids are NOT weighted by number of points
-	#centroids = km_model.cluster_centers_
+	# When we've found a satisfactory grouping, get central values for each group.
 	centroids_list = []
 	for label_i in np.unique(labels):
 		cluster_map = (labels == label_i)
 		cluster_points = trans_proj_cloud[cluster_map, :]
+		# Find the minimums and maximums in each dimension
 		min_corner = np.min(cluster_points, axis=0)
 		max_corner = np.max(cluster_points, axis=0)
+		# The middle point between the minimums and maximums will be our spatial center for this label
 		spatial_center = np.mean((min_corner, max_corner), axis=0)
 		centroids_list.append(spatial_center)
 	centroids = np.array(centroids_list)
+
+	# The k-means model does produce centroids, but their ordering is unknown (but likely the same
+	# order as the labels counting up). It also likely leans towards higher densities of points
+	# (which I'm now realizing is mostly irrelevant, since in-plane translation of the selected
+	# points relative to the real, physical panel is assumed to be imprecise already)
+	#centroids = km_model.cluster_centers_
+
 	return labels, centroids, trans_proj_cloud
 		
 
-	
-# Following function was generated by ChatGPT then simplified to use skspatial objects and
-# methods. It's basic purpose is to generate two vectors that are orthogonal with the normal
-# of our plane, and thus in the plane, such that they can act as bases for that plane.
-def generate_orthonormal_basis(plane, seeded=None):
-	# Option to set a seed to get repeatable bases for our plane
-	if seeded is not None:
-		np.random.seed(seeded)
-	# Normalize the normal to our plane (get it as a vector with a magnitude of one, a unit vector)
+def generate_orthonormal_basis(plane, seed=None):
+	"""
+	Following function was generated by ChatGPT then simplified to use skspatial objects and methods. It's
+	basic purpose is to generate two random vectors that are orthogonal with the normal of our plane.
+
+	:param plane: An skspatial.objects.Plane object
+	:param seed: An integer value to get repeatable results
+	:return: basis_vector_1, basis_vector_2: Two vectors that are orthogonal with the normal of the input plane
+	"""
+	if seed is not None:
+		np.random.seed(seed)
+	# Normalize the normal to our plane (make it a vector with a magnitude of one, a unit vector)
 	plane_norm = plane.normal.unit()
-	# Generate some completely random vector
+
+	# Generate a completely random vector in 3d
 	random_vector = np.random.randn(3)
-	
 	# Make sure the random vector is not parallel to the normal vector of our plane
-	# (which is so absurdly unlikely it's basically impossible, but we like being thorough)
+	# (which is basically impossible as a random float, but we like being thorough)
 	while np.allclose(np.dot(random_vector, plane_norm), 0):
 		random_vector = np.random.randn(3)
 	
-	# Project the random vector onto the plane to make it orthogonal to the normal vector,
-	# then normalize it to a unit vector, so that it can qualify as a basis for our plane
+	# Project the random vector onto the plane to make it orthogonal
+	# to the normal vector, then normalize it to a unit vector
 	basis_vector_1 = plane.project_vector(skobj.Vector(random_vector)).unit()
 	
 	# Create the second basis vector by taking the cross product of the normal and the first basis
@@ -329,28 +351,33 @@ def generate_orthonormal_basis(plane, seeded=None):
 	
 # Code in this function was partially generated with ChatGPT then modified
 def iter_best_fit_plane(coordinates):
-	
-	chunk_size = 10000  # Adjust as per your memory constraints and data size
+	"""
+	For a given set of coordinates, cumulatively find the plane of best fit. This iterative method means the
+	plane of best fit can be calculated for extremely large sets of points for which the SKSpatial library struggles.
+
+	:param coordinates: A n*x shaped NumPy array containing coordinates for a point cloud
+	:return: plane: An skspatial.objects.Plane object, with a center, normal and various methods
+	"""
+	# The number of points to be processed at once
+	chunk_size = 10000
 	
 	# Initialize the plane parameters
 	n_accumulated = 0
 	centroid_accumulated = np.zeros(3)
 	covariance_accumulated = np.zeros((3, 3))
 	
-	# Process points in chunks
+	# Process chunk_size number of points at once, iterating through all points
 	for i in range(0, len(coordinates), chunk_size):
+		# Get all points for this chunk
 		chunk_points = coordinates[i:i + chunk_size]
+		# If we're at the end of the set of points, the number of points
+		# in this chunk may be smaller than the normal chunk_size
 		n_chunk = len(chunk_points)
 		
-		# Accumulate centroid
+		# This takes a weighted average, judging weight by the number of points contributing to the
+		# existing accumulated centroid vs. the number of new points that are now influencing the centroid
 		centroid_chunk = np.mean(chunk_points, axis=0)
-		#print("\n\n\nIteration ", i)
-		#print(n_accumulated)
-		#print(centroid_accumulated)
-		#print(n_chunk)
-		#print(centroid_chunk)
-		centroid_accumulated = (n_accumulated * centroid_accumulated + n_chunk * centroid_chunk) / (
-				n_accumulated + n_chunk)
+		centroid_accumulated = (n_accumulated * centroid_accumulated + n_chunk * centroid_chunk) / (n_accumulated + n_chunk)
 		
 		# Accumulate covariance matrix
 		centered_chunk_points = chunk_points - centroid_chunk
@@ -367,26 +394,37 @@ def iter_best_fit_plane(coordinates):
 	# Create a Plane object with the accumulated normal and centroid
 	plane = skobj.Plane(normal=normal, point=centroid_accumulated)
 	
-	# Now 'plane' contains the fitted plane using incremental updates
 	return plane
 
 
-# This code was written for the original panel comparing algorithm, to graph grouped
-# collections of points and (optionally) the corresponding center points of each group
-def plot_clusters(dataset, cluster_labels, centroids=None):
+# ANNOTATED TO THIS POINT--------------------------------------------------------------------------------------------------------------------------------------------------------
+
+def plot_clusters(points, cluster_labels, centroids=None):
+	"""
+	This code was written for the original panel comparing algorithm, to graph grouped
+	collections of points and (optionally) the corresponding center points of each group
+
+	:param points: An n*x shaped array, where n is the number of points, and x is the dimension of their coordinates
+	:param cluster_labels: An n shaped array, where n is the number of points, containing
+		k unique values for the cluster label of a point in the corresponding row from 'points'
+	:param centroids: A k*x shaped array, where k is the number of clusters, and x is the dimension of their coordinates
+	:return: None
+	"""
 	plt.clf()
-	#color = plt.cm.rainbow(np.linspace(0, 1, cluster_labels.unique.shape[0]))
+	# This color map produces colors along a spectrum for each of the cluster labels
 	cmap = plt.get_cmap('plasma', np.unique(cluster_labels).shape[0])
-	for group_i in range(min(cluster_labels), max(cluster_labels) + 1):
-		cluster_map = (cluster_labels == group_i)
-		this_group = dataset[cluster_map, :]
-		plt.scatter(this_group[:, 0], this_group[:, 1], marker='o', c=cmap(group_i))
+	for cluster_i in range(min(cluster_labels), max(cluster_labels) + 1):
+		# Get all points in this cluster
+		cluster_map = (cluster_labels == cluster_i)
+		this_group = points[cluster_map, :]
+		# Graph all points in this cluster, using the i_th color in the color map
+		plt.scatter(this_group[:, 0], this_group[:, 1], marker='o', c=cmap(cluster_i))
+		# If cluster centroids were provided, graph them as large Xs
 		if centroids is not None:
-			plt.plot(centroids[group_i, 0], centroids[group_i, 1], marker='x', c=cmap(group_i), markersize=30)
+			plt.plot(centroids[cluster_i, 0], centroids[cluster_i, 1], marker='x', c=cmap(cluster_i), markersize=30)
 	plt.show()
 
 
 if __name__ == '__main__':
 	main()
 	#find_panels(r"C:\Users\thetk\Documents\BYU\Work\pythonProject\panel_array_super-processer\v1\references\warped flasher\mesh_cut.stl", 27)
-	
