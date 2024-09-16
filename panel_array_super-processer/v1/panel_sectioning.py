@@ -59,9 +59,26 @@ def find_panel_data(cut_flasher_filepath, save_directory, panel_num, save_postte
 	:param save_posttext: text that will be added to the end of the name of the original panel array file for the .json file containing its centers and normals
 	:param verbose: set to True to print values as they are calculated in real time
 	:param graph_clusters: set to True to graph the clustered points in 2d when they are grouped
+
 	:return: A python dictionary with keys for (arbitrary) panel labels corresponding
-		to sub-dictionaries, with the keys "center" and "normal", containing the center
-		position of this panel and the normal to the best-fit plane for that group of points.
+		to sub-dictionaries with the keys "center" and "normal", containing the center
+		position of this panel and the normal to the best-fit plane for that group of points, formatted as follows:
+	
+	{
+		"<cluster_label>": {
+			"center": [
+				-437.89662057836836,
+				221.23474330596954,
+				565.891259105087
+			],
+			"normal": [
+				-0.10980522428272566,
+				-0.993527439362412,
+				-0.029086765963050078
+			]
+		},
+		...
+	}
 	"""
 	# Generate a list of points from the .stl file vertices
 	# TODO: Integrate the ability to read a variety of file types
