@@ -110,20 +110,55 @@ def find_panel_data(cut_flasher_filepath, save_directory, panel_num, save_postte
 
 
 def format_clusters(cluster_labels, point_cloud, main_vector):
+	"""
+	Based on a collection of cluster labels (produced by k-means) and the
+	list of point clouds belonging to those clusters, generate a collection
+	of nested Python dictionaries and lists representing panel data as follows:
+	
+	{
+		"<cluster_label>": {
+			"center": [
+				-437.89662057836836,
+				221.23474330596954,
+				565.891259105087
+			],
+			"normal": [
+				-0.10980522428272566,
+				-0.993527439362412,
+				-0.029086765963050078
+			]
+		},
+		...
+	}
+
+	:param cluster_labels: A list of cluster labels of shape m, corresponding to the points on rows of the point cloud
+	:param point_cloud: A point cloud of shape m*n, containing m points in n dimensions
+	:param main_vector: An n-dimensional list-like vector. The normals of each panel will be flipped (where necessary) to match this vector
+
+	:return: cluster data: A collection of nested Python dictionaries and lists representing panel data
+	
+	"""
 	cluster_data = {}
+	# Observe each label for clusters (in sorted order)
 	for label_i in np.unique(cluster_labels):
+		# Map only those points belonging to the cluster with label_i
 		cluster_map = (cluster_labels == label_i)
 		cluster_points = point_cloud[cluster_map, :]
+		# For this points in this cluster, remove outliers then generate a plane
 		final_plane, final_points, active_indices = planar_outlier_removal(cluster_points)
 		# TODO: Also remove outliers in the x and y directions
+		# Find the spatial center by finding the center of the box bounding all points in this cluster
 		min_corner = np.min(final_points, axis=0)
 		max_corner = np.max(final_points, axis=0)
 		spatial_center = np.mean((min_corner, max_corner), axis=0)
 		cluster_center = final_plane.project_point(spatial_center)
+		# Get the normal for the points representing a plane (created previously) for this cluster
 		cluster_normal = final_plane.normal.unit()
-		# Verify that every normal is facing the same direction as the main vector
+		# Ensure that every normal is facing the same direction as the main vector
 		if np.dot(cluster_normal, main_vector) < 0:
 			cluster_normal = - cluster_normal
+		# Add a key (label name) - pair (nested dictionary storing center and
+		# normal positions) to the dictionary storing data for all panels
 		cluster_data[str(label_i)] = {'center': tuple(cluster_center), 'normal': tuple(cluster_normal)}
 		
 	return cluster_data
