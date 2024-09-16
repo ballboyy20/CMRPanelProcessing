@@ -29,9 +29,29 @@ def main():
 
 def overwrite_labels(panel_data_dict, save_as=None):
 	"""
-	This function takes an existing list of nested dictionaries representing panel data
-	and uses a graphical interface to reassign each panel's name. The new list is returned,
-	and saved as a .json file if a full filepath was passed as a parameter.
+	This function takes an existing collection of nested dictionaries representing panel data
+	and uses a graphical interface to let the user reassign each panel's name. The new collection
+	is returned (and saved as a .json file if a full filepath was passed as a parameter).
+
+	:param panel_data_dict: a collection of nested Python dictionaries and lists representing panel data as follows:
+		{
+			"<cluster_label>": {
+				"center": [
+					-437.89662057836836,
+					221.23474330596954,
+					565.891259105087
+				],
+				"normal": [
+					-0.10980522428272566,
+					-0.993527439362412,
+					-0.029086765963050078
+				]
+			},
+			...
+		}
+	:param save_as: None OR a complete filepath (including the .json ending) to save the return value as a .json file
+
+	:return: panel_data_dict: the modified version of the original dictionary.
 	"""
 	center_list = []
 	norm_list = []
@@ -125,6 +145,15 @@ def display_graph(coords, norms, highlight_point_index, size_key=None, text_key=
 	This function takes panel center and normal information, including the sizes of	points
 	and a point to be highlighted, and graphs them into a MatPlotLib plot, such that the
 	user can clearly see where any highlighted point is relative to all others.
+
+	:param coords: an m*3 array, where m is some number of points representing panel centers, each in 3D coordinates
+	:param norms: an m*3 array, where m is some number of vectors representing panel normals, each in 3D coordinates
+	:param highlight_point_index: an integer that is > 0 and < m, representing
+		the row index of a point from "coords" to be highlighted in a different color
+	:param size_key: None to use default point sizes, or an array of shape m containing sizes for each point that will be graphed
+	:param size_key: None to ommit labels for points, or an array of shape m containing text labels for each point that will be graphed
+
+	:return: fig: a matplotlib.pyplot.figure object, to which all of these points, vectors and labels have been graphed
 	"""
 	# Create a single 3D figure
 	fig = plt.figure()
