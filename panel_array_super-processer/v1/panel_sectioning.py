@@ -48,20 +48,40 @@ def main():
 	find_panel_data(warped_flasher_file, warped_flasher_data_directory, 27, save_posttext='_panelData')
 
 
-# High level wrapper function where the various steps are executed
 def find_panel_data(cut_flasher_filepath, save_directory, panel_num, save_posttext='_panel_data', verbose=False, graph_clusters=True):
 	"""
+	This function starts with the filepath of a preprocessed .stl file representing
+	panels. Outliers are removed and k-means is used to generate clusters
+
 	:param cut_flasher_filepath: Filepath to a .stl file containing uniformly sized selections from flat_scans surfaces on panels of a panel array
 	:param save_directory: None or Directory path to which the centers and normals of the panel groups from the panel array will be saved
 	:param panel_num: The number of point selection groups, normally representing panels, which will be used by k-means
 	:param save_posttext: text that will be added to the end of the name of the original panel array file for the .json file containing its centers and normals
 	:param verbose: set to True to print values as they are calculated in real time
 	:param graph_clusters: set to True to graph the clustered points in 2d when they are grouped
+
 	:return: A python dictionary with keys for (arbitrary) panel labels corresponding
-		to sub-dictionaries, with the keys "center" and "normal", containing the center
-		position of this panel and the normal to the best-fit plane for that group of points.
+		to sub-dictionaries with the keys "center" and "normal", containing the center
+		position of this panel and the normal to the best-fit plane for that group of points, formatted as follows:
+	
+	{
+		"<cluster_label>": {
+			"center": [
+				-437.89662057836836,
+				221.23474330596954,
+				565.891259105087
+			],
+			"normal": [
+				-0.10980522428272566,
+				-0.993527439362412,
+				-0.029086765963050078
+			]
+		},
+		...
+	}
 	"""
 	# Generate a list of points from the .stl file vertices
+	# TODO: Integrate the ability to read a variety of file types
 	mesh_points = pv.read(cut_flasher_filepath).points
 	# After iteratively removing outliers, save the plane of best fit and points
 	plane, points, kept_point_indices, iterations, original_range, new_range = planar_outlier_removal(mesh_points, cutoff_scaling=20, step=0.0005, verbose=True)
@@ -76,14 +96,15 @@ def find_panel_data(cut_flasher_filepath, save_directory, panel_num, save_postte
 		print("Removed Points: ", mesh_points.shape[0] - points.shape[0])
 		print("Removed Point Percentage: ", 100-100*(mesh_points.shape[0] - points.shape[0])/mesh_points.shape[0], "%")
 	
-	# Make clusters, considering the points if they were to be projected onto the plane of best fit of the whole array
+	# Make clusters of the points by how they are projected onto the 2D plane of best fit of the whole array
 	labels, centroids, ref_points_2d = get_clusters(points, plane, n_clusters=panel_num)
 	
 	# Optionally visualizing the 2d groupings
 	if graph_clusters:
 		plot_clusters(ref_points_2d, labels, centroids)
 	
-	# Produce a .json compatible structure (lists and dictionaries) saving each panel's arbitrary label, center and normal
+	# Produce a .json compatible structure (lists and dictionaries containing only Python-native objects)
+	# saving each panel's randomly assigned unique label, center position and normal vector
 	cluster_data = format_clusters(labels, points, plane.normal)
 	
 	if save_directory is not None:
@@ -106,76 +127,111 @@ def find_panel_data(cut_flasher_filepath, save_directory, panel_num, save_postte
 
 
 def format_clusters(cluster_labels, point_cloud, main_vector):
+	"""
+	Based on a collection of cluster labels (produced by k-means) and the
+	list of point clouds belonging to those clusters, generate a collection
+	of nested Python dictionaries and lists representing panel data as follows:
+	
+	{
+		"<cluster_label>": {
+			"center": [
+				-437.89662057836836,
+				221.23474330596954,
+				565.891259105087
+			],
+			"normal": [
+				-0.10980522428272566,
+				-0.993527439362412,
+				-0.029086765963050078
+			]
+		},
+		...
+	}
+
+	:param cluster_labels: A list of cluster labels of shape m, corresponding to the points on rows of the point cloud
+	:param point_cloud: A point cloud of shape m*n, containing m points in n dimensions
+	:param main_vector: An n-dimensional list-like vector. The normals of each panel will be flipped (where necessary) to match this vector
+
+	:return: cluster data: A collection of nested Python dictionaries and lists representing panel data
+	
+	"""
 	cluster_data = {}
+	# Observe each label for clusters (in sorted order)
 	for label_i in np.unique(cluster_labels):
+		# Map only those points belonging to the cluster with label_i
 		cluster_map = (cluster_labels == label_i)
 		cluster_points = point_cloud[cluster_map, :]
+		# For this points in this cluster, remove outliers then generate a plane
 		final_plane, final_points, active_indices = planar_outlier_removal(cluster_points)
 		# TODO: Also remove outliers in the x and y directions
+		# Find the spatial center by finding the center of the box bounding all points in this cluster
 		min_corner = np.min(final_points, axis=0)
 		max_corner = np.max(final_points, axis=0)
 		spatial_center = np.mean((min_corner, max_corner), axis=0)
 		cluster_center = final_plane.project_point(spatial_center)
+		# Get the normal for the points representing a plane (created previously) for this cluster
 		cluster_normal = final_plane.normal.unit()
-		# Verify that every normal is facing the same direction as the main vector
+		# Ensure that every normal is facing the same direction as the main vector
 		if np.dot(cluster_normal, main_vector) < 0:
 			cluster_normal = - cluster_normal
+		# Add a key (label name) - pair (nested dictionary storing center and
+		# normal positions) to the dictionary storing data for all panels
 		cluster_data[str(label_i)] = {'center': tuple(cluster_center), 'normal': tuple(cluster_normal)}
 		
 	return cluster_data
 	
 		
-
-
-# This will remove outlier points, relative to the normal of the plane of
-# best fit, until the range of refined points has more than the target
-# proportion of the previous iteration (i.e. when removing the extreme
-# points is no longer significantly affecting the point distribution
-# along that direction)
 def planar_outlier_removal(original_points, outlier_axis='norm', target=None, cutoff_scaling=20,
 						   step=0.001, iter_limit=20, verbose=False):
 	"""
+	This will remove points that are outliers by their positions projected onto the normal
+	of the plane of best fit. This is repeated iteratively until removing the extreme
+	points no longer significantly affects the distribution of the remaining points.
+
 	:param original_points: PyVista object containing all points in the mesh being read
 	:param outlier_axis: 'norm' or skspatial.objects.Line object. If left to default 'norm', will remove outliers
 		relative to the normal of the plane of best fit. Otherwise, will remove outliers relative to the provided line.
-	:param target: Float between 0.0 and 1.0. The proportion of the range along the normal of the new reduced plane
-		to the range along the normal of the previous plane at which point the iterative program will stop removing points.
+	:param target: Float between 0.0 and 1.0. The program measures the proportion of a) the range of points projected onto the normal of the plane after outliers have been removed,
+		to b) the range of those points including the outliers. The iterative program will stop removing points when this proportion exceeds that of 'target'
 	:param cutoff_scaling: Positive float value. Alternative option to target, sets the target proportion as 1.0 - cutoff_scaling * step.
-	:param step: The combined proportion removed equally from the extremities along the normal of the plane of best fit
+		A bigger target value will be easier to reach, while a small target value will only be reached when a very high density of points is located.
+	:param step: The combined proportion removed equally from the extremities along the normal of the plane of best fit per pass. As
+		long as no specific 'target' value has been passed, smaller steps means outlier removal will take more iterations and be more
+		fine (potentially being less greedy while removing outliers, at the risk of being more sensitive to large collections of outliers)
 	:param iter_limit: After this many iterations removing outliers, stop, and return what was obtained
 	:return final_plane, final_points: The remaining points and the plane of best fit that was generated from them
 	"""
 	# ^ is the logical NAND operator: True if exactly one of the inputs are True, False otherwise.
+	# Either a manual target must be set, or the cutoff_scaling left (or updated)
 	if not ((target is None) ^ (cutoff_scaling is None)):
-		raise UserWarning("You must provide a target removal percentage, or at make sure cutoff_scaling is not None.")
-	
+		raise UserWarning("You must provide a target removal percentage, or at least make sure cutoff_scaling is not None.")
+
 	# I added the "cutoff_scaling" option because of a way that I found "target" could break.
-	# If the step size was very small, target doesn't change at all, and at some point,
+	# If the step size was changed to be very small but target wasn't changed at all,
 	# removing few enough outliers does sufficiently little to shrink the total range
-	# that the target is instantly met. Setting our final_target relative to our steps
-	# implies that for small steps, the new range must be significantly closer to the
-	# previous iteration's range than would be required to stop removing outliers for
-	# large steps. Increasing the cutoff_scaling makes the target easier to meet, to avoid cutting
-	# out too many points.
+	# that the target may be instantly met. Making the final_target directly correlated to step size
+	# implies that for smaller steps, the target is higher and harder to hit.
 	if target:
 		final_target = target
 	else:
 		final_target = 1.0 - (cutoff_scaling * step)
 	
 	# This does the following to the data:
-	#  1) Create a 1d array, matching our cloud_array, of the points by their positions along the normal of the plane
-	#  2) Return only the points corresponding to some inter % of the points, ordered along the normal
+	#  1) Create a 1d array, of the same height as the passed points, containing their positions projected onto the normal of the plane
+	#  2) Remove some outer percentage of points from both extremes (determined by step)
+	# TODO: Visualize the distribution of points along the normal of a plane of best fit using a ____ plot
 	def remove_outliers(old_points, outlier_line):
 		# Project all points of the point cloud onto this line
 		cloud_line = outlier_line.transform_points(old_points)
-		# Get the total range of values along this line
+		# Find the total range of values of all points along the normal line
 		old_range = max(cloud_line) - min(cloud_line)
-		# Get the minimum and maximum values of the inner range for points to be cut off
+		# Get the values of the upper and lower percentile points to create an inner range of values for the points to be kept
+		# TODO: update this to use quantile (to remove scaling by a factor of 100)
 		lower_bound = np.percentile(cloud_line, 100 * (0.0 + step / 2))
 		upper_bound = np.percentile(cloud_line, 100 * (1.0 - step / 2))
-		# Solve for the new resulting range of values along the normal line
+		# Find the total range of values of the points within that inner range along the normal line
 		new_range = upper_bound - lower_bound
-		# Make a active_indices indicating only those points within the lower and upper bounds along the normal
+		# Make a active_indices map correlating only those rows for points within the lower and upper bounds along the normal
 		inner_mask = (cloud_line >= lower_bound) & (cloud_line <= upper_bound)
 		# Apply that active_indices to the point cloud itself
 		new_points = old_points[inner_mask]
@@ -186,30 +242,34 @@ def planar_outlier_removal(original_points, outlier_axis='norm', target=None, cu
 	original_range = None
 	active_indices = np.arange(original_points.shape[0])
 	
-	# Iteratively remove outliers until the ratio of the new range
-	# to the old range for this iteration meets the final target
+
+	# Iteratively remove the outer percentiles of outliers until this has a sufficiently small effect on the
+	# total value range of points as projected along the normal of the plane of best fit
 	while True:
 		# By default, outliers will be removed along the normal of the plane of best fit of this collection of points
 		if outlier_axis == 'norm':
 			# Get a line through the plane's center and normal
 			prev_plane = iter_best_fit_plane(prev_points)
 			removal_line = skobj.Line(point=prev_plane.point, direction=prev_plane.normal)
-		# An skspatial.objects.Line object can be provided as an axis for the removal of outliers instead
+		# An skspatial.objects.Line object can be provided as an axis for the
+		# removal of outliers instead, to remove outliers in other 1D axes
 		else:
 			assert isinstance(outlier_axis, skobj.Line)
 			removal_line = outlier_axis
-		# Get the list of points, the mask that produced them, and the old and new ranges.
+		# Get the list of new points without outliers, the mask that produced them, and the old and new ranges each.
 		filtered_points, this_mask, new_range, old_range = remove_outliers(prev_points, removal_line)
-		# We need to keep track of the original positions of these filtered points, such
-		# that the faces of the original shape can still be referenced correctly at the end of this whole process
+		# We need to keep track of the index positions of these filtered points from the original array where
+		# they were stored. The faces in .stl files are groups of index references to vertex positions. Saving
+		# indicies allows us to rebuild those original faces (excluding any faces that included outlier points)
+		# TODO: Find a way to accound for points that were ignored because they shared a face with an outlier
 		active_indices = active_indices[this_mask]
 		iterations += 1
-		# The first time we solve the range of points, save it (for reference of before vs. after removing outliers)
+		# The first time we solve the range of points, save it
 		if original_range is None:
 			original_range = copy(old_range)
-		# If the removal of these outliers has a sufficiently small effect on the range of points
-		# along the normal of the plane such that it meets the target, stop iterating, we have
-		# converged on an appropriate solution. OR, if the iteration limit is reached, stop just the same.
+		# When the ratio of a) the range of this new iteration to b) the range of the previous
+		# iteration meets the final target, stop iterating, we have converged on an appropriate
+		# solution. OR, if the iteration limit is reached, stop just the same.
 		if (new_range / old_range > final_target) or (iterations >= iter_limit):
 			final_plane = iter_best_fit_plane(filtered_points)
 			final_points = filtered_points
@@ -225,90 +285,114 @@ def planar_outlier_removal(original_points, outlier_axis='norm', target=None, cu
 		return final_plane, final_points, active_indices
 
 
-# This will sort through the complete list of points to form some number of groups
-def get_clusters(point_cloud, best_fit_plane, n_clusters, cluster_similarity=2.5, km_iter_lim=20):
+def get_clusters(point_cloud, best_fit_plane, n_clusters, cluster_similarity=2.5, km_iter_lim=20, center_type='spatial', verbose=True):
 	"""
+	Observing a set of points, project them into their own plane of best fit, then use
+	k-means to identify the point groups selected by the user during preprocessing.
+	Verify that all clusters are similarly sized (to a tolerance), then return them.
 	
 	:param point_cloud: skspatial.objects.Points object or a NumPy array where a list of vertices is provided
 	:param best_fit_plane: skspatial.objects.Plane object, for this point cloud
 	:param n_clusters: Integer value for the number of groups to search for, passed along to k-means
 	:param cluster_similarity: Float value, if the ratio of the largest group to the smallest one is greater than this, k-means will be reinitialized
-	:param km_iter_lim: After this many iterations, raise a TimeoutError, since a satisfactory solution could not be reached
+	:param km_iter_lim: After this many iterations, raise a TimeoutError, since satisfactory clusters couldn't be formed
+	:param center_type: 'spatial' to calculate cluster centers as the middle points of the extremes
+		in each dimension, 'centroid' to use the centroids produced by the k-means algorithm itself
+	:param verbose: If True, give real time data as clusters are formed
 	:return: labels, centroids, trans_proj_cloud: For all points, labels about which cluster the point would
 		be grouped into. Central positions for each cluster. The 2D transformed coordinates that were used.
 	"""
-	# Randomly produce the x and y components of an orthonormal basis with the normal of the plane of
+	# Randomly produce x and y vectors that form an orthonormal basis with the normal of the plane of best fit
 	b1, b2 = generate_orthonormal_basis(best_fit_plane)
-	# Transform the points into a coordinate system using the above unit vectors (and the best fit plane's normal vector) as bases.
+	# Transform the points into a coordinate system with the previously generated unit vectors (and the
+	# plane of best fit's normal vector) as bases and the plane of best fit's point as the origin. Discard
+	# the z coordinates (out of the plane), effectively projecting the points onto a 2D plane.
 	trans_proj_cloud = sktrf.transform_coordinates(point_cloud, best_fit_plane.point, (b1, b2, best_fit_plane.normal))[:, 0:2]
 	
-	print(f"Using k-means clustering algorithm, searching for {n_clusters} clusters.")
+	if verbose:
+		print(f"Using k-means clustering algorithm, searching for {n_clusters} clusters.")
+
 	if not isinstance(n_clusters, int):
 		raise UserWarning("k-means requires an integer for the number of clusters, but you provided ", n_clusters)
 	iteration = 1
-	# Keep reinitializing k-means if the cluster sizes are too different
+	# Keep reinitializing k-means until clusters are formed that are close enough in size
 	while True:
 		if iteration > km_iter_lim:
 			raise TimeoutError(f"With {iteration} iterations, surpassed the limit set for k-means. Try adjusting"
 							   f"cluster_similarity to expand or shrink the expected similarity in size between"
 							   f"clusters, or increasing the allowed number of iterations with km_iter_lim")
-		# Initializing, fitting and making predictions about labels with the model
+		# Initializing
 		km_model = KMeans(n_clusters=n_clusters)
-		# Make a k shaped array, where each value is an integer, representing the
-		# label for a point at the corresponding row of points passed to the model
+		# Fitting the model to our 2D transformed point cloud and grouping it. Makes a 1D array,
+		# where each element is an integer, representing the assigned cluster
+		# of the point at the corresponding row of the point cloud passed to the model.
 		labels = km_model.fit_predict(trans_proj_cloud)
 		# Make a k * n shaped array, where n is the number of dimensions of our coordinates,
-		# and k is the number of groups, where each column (n) contains the maximal distance
-		# between points of a given group (by row, k) in that particular dimension
+		# and k is the number of clusters, where each column (n) contains the maximal distance
+		# in that dimension for all points of a given cluster (by row, k)
 		ranges = np.array([np.ptp(trans_proj_cloud[labels == label], axis=0) for label in np.unique(labels)])
-		# Make two n shaped array, respectively containing the smallest and largest group size values of each dimension
+		# Make two n shaped array, respectively containing the smallest and largest cluster sizes in each dimension
 		min_ranges = np.min(ranges, axis=0)
 		max_ranges = np.max(ranges, axis=0)
-		print("Smallest cluster size (x, y): ", min_ranges)
-		print("Largest cluster size (x, y): ", max_ranges)
-		# For all dimensions (columns), if the maximum range is less than 120% of the minimum range, the model must have made even groups that catch all panels.
+		if verbose:
+			print("Smallest cluster size (x, y): ", min_ranges)
+			print("Largest cluster size (x, y): ", max_ranges)
+		# For all dimensions (columns), if the maximum range is less than 120% of the minimum range, the model must have made
+		# even groups that catch all panels. When this is done, simply exit the loop and use the latest assigned group values.
 		if np.all(max_ranges <= min_ranges * cluster_similarity):
-			print(f"After {iteration} iterations, found clusters such that the largest group's size is within {100*cluster_similarity}% of the that of the smallest group.")
+			if verbose:
+				print(f"After {iteration} iterations, found clusters such that the largest group's size is within {100*cluster_similarity}% of the that of the smallest group.")
 			break
 		else:
-			print("There exists a dissimilarity in size greater than the limit of ", 100*cluster_similarity, "%")
-			print("Re-initializing k-means to try again...")
+			if verbose:
+				print("There exists a dissimilarity in size greater than the limit of ", 100*cluster_similarity, "%")
+				print("Re-initializing k-means to try again...")
 			iteration += 1
-	# The k-means model also generates centers for each cluster. When we've found a satisfactory grouping, get the centroids of each group.
-	#TODO: Verify that the centroids are NOT weighted by number of points
-	#centroids = km_model.cluster_centers_
+	# When we've found a satisfactory grouping, get central values for each group.
 	centroids_list = []
 	for label_i in np.unique(labels):
 		cluster_map = (labels == label_i)
 		cluster_points = trans_proj_cloud[cluster_map, :]
+		# Find the minimums and maximums in each dimension
 		min_corner = np.min(cluster_points, axis=0)
 		max_corner = np.max(cluster_points, axis=0)
+		# The middle point between the minimums and maximums will be our spatial center for this label
 		spatial_center = np.mean((min_corner, max_corner), axis=0)
 		centroids_list.append(spatial_center)
 	centroids = np.array(centroids_list)
+
+	# The k-means model does produce centroids, but their ordering is unknown (but likely the same
+	# order as the labels counting up). It also likely leans towards higher densities of points
+	# (which I'm now realizing is mostly irrelevant, since in-plane translation of the selected
+	# points relative to the real, physical panel is assumed to be imprecise already)
+	#centroids = km_model.cluster_centers_
+
 	return labels, centroids, trans_proj_cloud
 		
 
-	
-# Following function was generated by ChatGPT then simplified to use skspatial objects and
-# methods. It's basic purpose is to generate two vectors that are orthogonal with the normal
-# of our plane, and thus in the plane, such that they can act as bases for that plane.
-def generate_orthonormal_basis(plane, seeded=None):
-	# Option to set a seed to get repeatable bases for our plane
-	if seeded is not None:
-		np.random.seed(seeded)
-	# Normalize the normal to our plane (get it as a vector with a magnitude of one, a unit vector)
+def generate_orthonormal_basis(plane, seed=None):
+	"""
+	Following function was generated by ChatGPT then simplified to use skspatial objects and methods. It's
+	basic purpose is to generate two random vectors that are orthogonal with the normal of our plane.
+
+	:param plane: An skspatial.objects.Plane object
+	:param seed: An integer value to get repeatable results
+	:return: basis_vector_1, basis_vector_2: Two vectors that are orthogonal with the normal of the input plane
+	"""
+	if seed is not None:
+		np.random.seed(seed)
+	# Normalize the normal to our plane (make it a vector with a magnitude of one, a unit vector)
 	plane_norm = plane.normal.unit()
-	# Generate some completely random vector
+
+	# Generate a completely random vector in 3d
 	random_vector = np.random.randn(3)
-	
 	# Make sure the random vector is not parallel to the normal vector of our plane
-	# (which is so absurdly unlikely it's basically impossible, but we like being thorough)
+	# (which is basically impossible as a random float, but we like being thorough)
 	while np.allclose(np.dot(random_vector, plane_norm), 0):
 		random_vector = np.random.randn(3)
 	
-	# Project the random vector onto the plane to make it orthogonal to the normal vector,
-	# then normalize it to a unit vector, so that it can qualify as a basis for our plane
+	# Project the random vector onto the plane to make it orthogonal
+	# to the normal vector, then normalize it to a unit vector
 	basis_vector_1 = plane.project_vector(skobj.Vector(random_vector)).unit()
 	
 	# Create the second basis vector by taking the cross product of the normal and the first basis
@@ -319,28 +403,33 @@ def generate_orthonormal_basis(plane, seeded=None):
 	
 # Code in this function was partially generated with ChatGPT then modified
 def iter_best_fit_plane(coordinates):
-	
-	chunk_size = 10000  # Adjust as per your memory constraints and data size
+	"""
+	For a given set of coordinates, cumulatively find the plane of best fit. This iterative method means the
+	plane of best fit can be calculated for extremely large sets of points for which the SKSpatial library struggles.
+
+	:param coordinates: A n*x shaped NumPy array containing coordinates for a point cloud
+	:return: plane: An skspatial.objects.Plane object, with a center, normal and various methods
+	"""
+	# The number of points to be processed at once
+	chunk_size = 10000
 	
 	# Initialize the plane parameters
 	n_accumulated = 0
 	centroid_accumulated = np.zeros(3)
 	covariance_accumulated = np.zeros((3, 3))
 	
-	# Process points in chunks
+	# Process chunk_size number of points at once, iterating through all points
 	for i in range(0, len(coordinates), chunk_size):
+		# Get all points for this chunk
 		chunk_points = coordinates[i:i + chunk_size]
+		# If we're at the end of the set of points, the number of points
+		# in this chunk may be smaller than the normal chunk_size
 		n_chunk = len(chunk_points)
 		
-		# Accumulate centroid
+		# This takes a weighted average, judging weight by the number of points contributing to the
+		# existing accumulated centroid vs. the number of new points that are now influencing the centroid
 		centroid_chunk = np.mean(chunk_points, axis=0)
-		#print("\n\n\nIteration ", i)
-		#print(n_accumulated)
-		#print(centroid_accumulated)
-		#print(n_chunk)
-		#print(centroid_chunk)
-		centroid_accumulated = (n_accumulated * centroid_accumulated + n_chunk * centroid_chunk) / (
-				n_accumulated + n_chunk)
+		centroid_accumulated = (n_accumulated * centroid_accumulated + n_chunk * centroid_chunk) / (n_accumulated + n_chunk)
 		
 		# Accumulate covariance matrix
 		centered_chunk_points = chunk_points - centroid_chunk
@@ -357,26 +446,35 @@ def iter_best_fit_plane(coordinates):
 	# Create a Plane object with the accumulated normal and centroid
 	plane = skobj.Plane(normal=normal, point=centroid_accumulated)
 	
-	# Now 'plane' contains the fitted plane using incremental updates
 	return plane
 
 
-# This code was written for the original panel comparing algorithm, to graph grouped
-# collections of points and (optionally) the corresponding center points of each group
-def plot_clusters(dataset, cluster_labels, centroids=None):
+def plot_clusters(points, cluster_labels, centroids=None):
+	"""
+	This code was written for the original panel comparing algorithm, to graph grouped
+	collections of points and (optionally) the corresponding center points of each group
+
+	:param points: An n*x shaped array, where n is the number of points, and x is the dimension of their coordinates
+	:param cluster_labels: An n shaped array, where n is the number of points, containing
+		k unique values for the cluster label of a point in the corresponding row from 'points'
+	:param centroids: A k*x shaped array, where k is the number of clusters, and x is the dimension of their coordinates
+	:return: None
+	"""
 	plt.clf()
-	#color = plt.cm.rainbow(np.linspace(0, 1, cluster_labels.unique.shape[0]))
+	# This color map produces colors along a spectrum for each of the cluster labels
 	cmap = plt.get_cmap('plasma', np.unique(cluster_labels).shape[0])
-	for group_i in range(min(cluster_labels), max(cluster_labels) + 1):
-		cluster_map = (cluster_labels == group_i)
-		this_group = dataset[cluster_map, :]
-		plt.scatter(this_group[:, 0], this_group[:, 1], marker='o', c=cmap(group_i))
+	for cluster_i in range(min(cluster_labels), max(cluster_labels) + 1):
+		# Get all points in this cluster
+		cluster_map = (cluster_labels == cluster_i)
+		this_group = points[cluster_map, :]
+		# Graph all points in this cluster, using the i_th color in the color map
+		plt.scatter(this_group[:, 0], this_group[:, 1], marker='o', c=cmap(cluster_i))
+		# If cluster centroids were provided, graph them as large Xs
 		if centroids is not None:
-			plt.plot(centroids[group_i, 0], centroids[group_i, 1], marker='x', c=cmap(group_i), markersize=30)
+			plt.plot(centroids[cluster_i, 0], centroids[cluster_i, 1], marker='x', c=cmap(cluster_i), markersize=30)
 	plt.show()
 
 
 if __name__ == '__main__':
 	main()
 	#find_panels(r"C:\Users\thetk\Documents\BYU\Work\pythonProject\panel_array_super-processer\v1\references\warped flasher\mesh_cut.stl", 27)
-	
