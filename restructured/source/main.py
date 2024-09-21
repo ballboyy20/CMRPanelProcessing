@@ -1,4 +1,4 @@
-from Panel import is_this_working
+from Panel import Panel
 
-print("hello world")
-is_this_working()
+print("Hello world")
+print("This is going to analyze some scans :) ")

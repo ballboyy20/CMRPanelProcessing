@@ -9,3 +9,6 @@ class Panel:
 
     def __getattribute__(self, name: str) -> Any:
         pass
+
+    def get_normal_vector(self) -> tuple:
+        return self.normal_unit_vector
